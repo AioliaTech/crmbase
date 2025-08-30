@@ -175,16 +175,21 @@ app.post('/webhook/zapper', async (req, res) => {
         } else if (messageObj.imageMessage) {
             messageType = 'image';
             messageText = messageObj.imageMessage.caption || '';
-            // Usar mediaUrl da ZapperAPI se disponível, senão usar URL original
-            finalMediaUrl = mediaUrl || messageObj.imageMessage.url;
+            // Priorizar mediaUrl da ZapperAPI, que já está processada e acessível
+            finalMediaUrl = mediaUrl || null;
+            console.log('📷 Imagem recebida:', {
+                originalUrl: messageObj.imageMessage.url,
+                zapperMediaUrl: mediaUrl,
+                finalUrl: finalMediaUrl
+            });
         } else if (messageObj.videoMessage) {
             messageType = 'video';
             messageText = messageObj.videoMessage.caption || '';
-            finalMediaUrl = mediaUrl || messageObj.videoMessage.url;
+            finalMediaUrl = mediaUrl || null;
         } else if (messageObj.audioMessage) {
             messageType = 'audio';
             messageText = '';
-            finalMediaUrl = mediaUrl || messageObj.audioMessage.url;
+            finalMediaUrl = mediaUrl || null;
         } else if (messageObj.documentMessage) {
             messageType = 'document';
             messageText = messageObj.documentMessage.fileName || 'Documento';
@@ -423,6 +428,22 @@ app.post('/api/upload-media', upload.single('media'), async (req, res) => {
             fileName: req.file.originalname 
         });
         
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// API para debug - ver URLs de mídia no banco
+app.get('/api/debug/media', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT id, message_text, message_type, media_url, timestamp 
+            FROM crm_messages 
+            WHERE message_type != 'text' AND media_url IS NOT NULL
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        `);
+        res.json(result.rows);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }

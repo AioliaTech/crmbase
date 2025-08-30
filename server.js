@@ -271,8 +271,18 @@ app.post('/api/send-message', async (req, res) => {
             });
         }
         
-        // Formatar número no padrão do WhatsApp (@s.whatsapp.net)
-        const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`;
+        // Formatar número no padrão do WhatsApp 
+        // Testar diferentes formatos baseado no que funcionou no curl direto
+        let jid;
+        if (phone.includes('@')) {
+            jid = phone;
+        } else {
+            // Tentar o formato que funcionou no seu curl direto
+            jid = `${phone}@s.whatsapp.net`;
+        }
+        
+        console.log(`📱 Número original: ${phone}`);
+        console.log(`📱 JID formatado: ${jid}`);
         
         // Montar URL da ZapperAPI (formato correto)
         const zapperUrl = `${ZAPPER_CONFIG.apiUrl}/${ZAPPER_CONFIG.instanceId}/messages/text`;

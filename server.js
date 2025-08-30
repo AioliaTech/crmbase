@@ -87,11 +87,11 @@ async function uploadToBucket(filePath, fileName) {
     try {
         const fileBuffer = fs.readFileSync(filePath);
         
-        // Implementação básica para Backblaze B2
-        // Você pode usar a biblioteca oficial aws-sdk ou b2-sdk-js
-        const fileUrl = `${BUCKET_CONFIG.endpoint}/${BUCKET_CONFIG.bucketName}/${fileName}`;
+        // Por enquanto, retornar URL simulada
+        // TODO: Implementar upload real para Backblaze B2 quando necessário
+        const timestamp = Date.now();
+        const fileUrl = `${BUCKET_CONFIG.endpoint}/${BUCKET_CONFIG.bucketName}/${timestamp}_${fileName}`;
         
-        // TODO: Implementar upload real para Backblaze B2
         console.log(`📦 Simulando upload: ${fileName} para ${BUCKET_CONFIG.bucketName}`);
         
         // Remove arquivo temporário
@@ -127,7 +127,8 @@ app.post('/webhook/zapper', async (req, res) => {
             messageTimestamp,
             pushName,
             message: messageObj,
-            instanceId
+            instanceId,
+            mediaUrl  // URL processada pela ZapperAPI
         } = body;
         
         // Processar timestamp que pode vir como número ou objeto {low, high}
@@ -163,6 +164,7 @@ app.post('/webhook/zapper', async (req, res) => {
         // Extrair texto da mensagem baseado no tipo
         let messageText = '';
         let messageType = 'text';
+        let finalMediaUrl = null;
         
         if (messageObj.conversation) {
             // Mensagem de texto simples
@@ -172,20 +174,25 @@ app.post('/webhook/zapper', async (req, res) => {
             messageText = messageObj.extendedTextMessage.text;
         } else if (messageObj.imageMessage) {
             messageType = 'image';
-            messageText = messageObj.imageMessage.caption || '📷 Imagem';
+            messageText = messageObj.imageMessage.caption || '';
+            // Usar mediaUrl da ZapperAPI se disponível, senão usar URL original
+            finalMediaUrl = mediaUrl || messageObj.imageMessage.url;
         } else if (messageObj.videoMessage) {
             messageType = 'video';
-            messageText = messageObj.videoMessage.caption || '🎥 Vídeo';
+            messageText = messageObj.videoMessage.caption || '';
+            finalMediaUrl = mediaUrl || messageObj.videoMessage.url;
         } else if (messageObj.audioMessage) {
             messageType = 'audio';
-            messageText = '🎵 Áudio';
+            messageText = '';
+            finalMediaUrl = mediaUrl || messageObj.audioMessage.url;
         } else if (messageObj.documentMessage) {
             messageType = 'document';
-            messageText = `📎 ${messageObj.documentMessage.fileName || 'Documento'}`;
+            messageText = messageObj.documentMessage.fileName || 'Documento';
+            finalMediaUrl = mediaUrl || messageObj.documentMessage.url;
         } else {
             // Tipo desconhecido
-            messageText = '📎 Mensagem não suportada';
-            console.log('🔍 Tipo de mensagem desconhecido:', Object.keys(messageObj));
+            messageText = 'Mensagem não suportada';
+            console.log('Tipo de mensagem desconhecido:', Object.keys(messageObj));
         }
         
         // Buscar ou criar conversa
@@ -269,7 +276,7 @@ app.get('/api/conversations/:id/messages', async (req, res) => {
 // API para enviar mensagem via ZapperAPI
 app.post('/api/send-message', async (req, res) => {
     try {
-        const { phone, message, messageType = 'text' } = req.body;
+        const { phone, message, messageType = 'text', mediaUrl } = req.body;
         
         if (!ZAPPER_CONFIG.instanceId || !ZAPPER_CONFIG.apiKey) {
             return res.status(500).json({ 
@@ -278,37 +285,56 @@ app.post('/api/send-message', async (req, res) => {
         }
         
         // Formatar número no padrão do WhatsApp 
-        // Testar diferentes formatos baseado no que funcionou no curl direto
         let jid;
         if (phone.includes('@')) {
             jid = phone;
         } else {
-            // Tentar o formato que funcionou no seu curl direto
             jid = `${phone}@s.whatsapp.net`;
         }
         
         console.log(`📱 Número original: ${phone}`);
         console.log(`📱 JID formatado: ${jid}`);
         
-        // Montar URL da ZapperAPI (formato correto)
-        const zapperUrl = `${ZAPPER_CONFIG.apiUrl}/${ZAPPER_CONFIG.instanceId}/messages/text`;
+        let zapperUrl, payload;
         
-        // Payload exato conforme documentação da ZapperAPI
-        const payload = {
-            jid: jid,
-            message: message,
-            mentions: [],
-            mentionsEveryone: false,
-            splitMessage: false,
-            processImageLink: true,
-            autoCaption: false,
-            expiration: "none"
-        };
+        // Diferentes endpoints baseado no tipo de mensagem
+        if (messageType !== 'text' && mediaUrl) {
+            // Envio de mídia usando endpoint /messages/media
+            zapperUrl = `${ZAPPER_CONFIG.apiUrl}/${ZAPPER_CONFIG.instanceId}/messages/media`;
+            
+            // Mapear tipos para mediaType da ZapperAPI
+            let zapperMediaType = messageType;
+            if (messageType === 'document') zapperMediaType = 'document';
+            
+            payload = {
+                jid: jid,
+                mediaType: zapperMediaType,  // image, video, audio, document
+                media: mediaUrl,             // URL da mídia (do BucketBlaze)
+                caption: message || '',
+                filename: `media_${Date.now()}.${messageType === 'image' ? 'jpg' : 'file'}`,
+                mentions: [],
+                mentionsEveryone: false
+            };
+        } else {
+            // Envio de texto usando endpoint /messages/text
+            zapperUrl = `${ZAPPER_CONFIG.apiUrl}/${ZAPPER_CONFIG.instanceId}/messages/text`;
+            payload = {
+                jid: jid,
+                message: message,
+                mentions: [],
+                mentionsEveryone: false,
+                splitMessage: false,
+                processImageLink: true,
+                autoCaption: false,
+                expiration: "none"
+            };
+        }
         
         console.log(`📤 Enviando para ZapperAPI:`);
         console.log(`URL: ${zapperUrl}`);
         console.log(`JID: ${jid}`);
         console.log(`Message: ${message}`);
+        console.log(`Type: ${messageType}`);
         console.log(`Instance ID: ${ZAPPER_CONFIG.instanceId}`);
         console.log(`API Key starts with: ${ZAPPER_CONFIG.apiKey?.substring(0, 10)}...`);
         
@@ -335,14 +361,15 @@ app.post('/api/send-message', async (req, res) => {
         
         await pool.query(`
             INSERT INTO crm_messages 
-            (conversation_id, message_id, sender_phone, message_text, message_type, is_from_me, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            (conversation_id, message_id, sender_phone, message_text, message_type, media_url, is_from_me, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `, [
             conversation.rows[0].id, 
             response.data.key || `sent_${Date.now()}`, 
             phone.replace('@s.whatsapp.net', ''), 
             message, 
             messageType, 
+            mediaUrl || null,
             true, 
             'sent'
         ]);

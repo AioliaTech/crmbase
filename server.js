@@ -10,7 +10,6 @@ const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
-// Configuração PostgreSQL
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
     host: process.env.DB_HOST || 'n8n_postgres',
@@ -19,23 +18,8 @@ const pool = new Pool({
     port: process.env.DB_PORT || 5432,
 });
 
-// Configuração BucketBlaze (Backblaze B2)
-const BUCKET_CONFIG = {
-    endpoint: process.env.BLAZE_ENDPOINT_URL || 'https://s3.us-west-004.backblazeb2.com',
-    accessKey: process.env.BLAZE_ACCESS_KEY || '0052da03b06eb430000000001',
-    secretKey: process.env.BLAZE_SECRET_KEY || 'K005hvxNotXi1CiNxc+DAbdrzDXjQbE',
-    bucketName: process.env.BLAZE_BUCKET_NAME || 'Integrador'
-};
-
 // Configuração de upload
 const upload = multer({ dest: 'temp/' });
-
-// Configuração ZapperAPI
-const ZAPPER_CONFIG = {
-    apiUrl: 'https://api.zapperapi.com',
-    instanceId: process.env.ZAPPER_INSTANCE_ID,
-    apiKey: process.env.ZAPPER_API_KEY
-};
 
 // Criar tabelas se não existirem
 async function initDB() {
@@ -412,23 +396,31 @@ app.post('/api/webhook-config', async (req, res) => {
     }
 });
 
-// Upload de mídia
+// Upload de mídia - versão simplificada
 app.post('/api/upload-media', upload.single('media'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'Nenhum arquivo enviado' });
         }
         
-        const fileName = `${Date.now()}_${req.file.originalname}`;
-        const mediaUrl = await uploadToBucket(req.file.path, fileName);
+        // Por enquanto, converter para base64 e enviar diretamente pela ZapperAPI
+        const fileBuffer = fs.readFileSync(req.file.path);
+        const base64 = fileBuffer.toString('base64');
+        const mimeType = req.file.mimetype;
         
+        // Remove arquivo temporário
+        fs.unlinkSync(req.file.path);
+        
+        // Retornar base64 para usar diretamente no envio
         res.json({ 
             success: true, 
-            mediaUrl, 
+            mediaBase64: base64,
+            mimeType: mimeType,
             fileName: req.file.originalname 
         });
         
     } catch (error) {
+        console.error('Erro no upload:', error);
         res.status(500).json({ error: error.message });
     }
 });

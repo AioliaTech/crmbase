@@ -257,13 +257,13 @@ app.post('/api/send-message', async (req, res) => {
             });
         }
         
-        // Formatar número no padrão do WhatsApp (adicionar @c.us se necessário)
-        const jid = phone.includes('@') ? phone : `${phone}@c.us`;
+        // Formatar número no padrão do WhatsApp (@s.whatsapp.net)
+        const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`;
         
-        // Montar URL da ZapperAPI
+        // Montar URL da ZapperAPI (formato correto)
         const zapperUrl = `${ZAPPER_CONFIG.apiUrl}/${ZAPPER_CONFIG.instanceId}/messages/text`;
         
-        // Payload para ZapperAPI
+        // Payload exato conforme documentação da ZapperAPI
         const payload = {
             jid: jid,
             message: message,
@@ -275,9 +275,16 @@ app.post('/api/send-message', async (req, res) => {
             expiration: "none"
         };
         
-        console.log(`📤 Enviando para ZapperAPI:`, { url: zapperUrl, payload });
+        console.log(`📤 Enviando para ZapperAPI:`, { 
+            url: zapperUrl, 
+            payload,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Api-Key': ZAPPER_CONFIG.apiKey
+            }
+        });
         
-        // Enviar via ZapperAPI
+        // Enviar via ZapperAPI com headers corretos
         const response = await axios.post(zapperUrl, payload, {
             headers: {
                 'Content-Type': 'application/json',
@@ -288,11 +295,11 @@ app.post('/api/send-message', async (req, res) => {
         console.log(`✅ Resposta da ZapperAPI:`, response.data);
         
         // Salvar mensagem enviada no banco
-        let conversation = await pool.query('SELECT * FROM crm_conversations WHERE phone = $1', [phone.replace('@c.us', '')]);
+        let conversation = await pool.query('SELECT * FROM crm_conversations WHERE phone = $1', [phone.replace('@s.whatsapp.net', '')]);
         if (conversation.rows.length === 0) {
             const newConv = await pool.query(
                 'INSERT INTO crm_conversations (phone, name) VALUES ($1, $2) RETURNING *',
-                [phone.replace('@c.us', ''), phone.replace('@c.us', '')]
+                [phone.replace('@s.whatsapp.net', ''), phone.replace('@s.whatsapp.net', '')]
             );
             conversation = newConv;
         }
@@ -304,7 +311,7 @@ app.post('/api/send-message', async (req, res) => {
         `, [
             conversation.rows[0].id, 
             response.data.key || `sent_${Date.now()}`, 
-            phone.replace('@c.us', ''), 
+            phone.replace('@s.whatsapp.net', ''), 
             message, 
             messageType, 
             true, 

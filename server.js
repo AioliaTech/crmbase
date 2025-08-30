@@ -10,6 +10,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
+// Configuração PostgreSQL
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
     host: process.env.DB_HOST || 'n8n_postgres',
@@ -17,6 +18,13 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD || '1dbf27c30ea64a151990',
     port: process.env.DB_PORT || 5432,
 });
+
+// Configuração ZapperAPI
+const ZAPPER_CONFIG = {
+    apiUrl: 'https://api.zapperapi.com',
+    instanceId: process.env.ZAPPER_INSTANCE_ID,
+    apiKey: process.env.ZAPPER_API_KEY
+};
 
 // Configuração de upload
 const upload = multer({ dest: 'temp/' });

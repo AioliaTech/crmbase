@@ -1,425 +1,543 @@
-// server.js
-const express = require('express');
-const { Pool } = require('pg');
-const multer = require('multer');
-const axios = require('axios');
-const path = require('path');
-const fs = require('fs');
-
-const app = express();
-app.use(express.json());
-app.use(express.static('public'));
-
-// Configuração PostgreSQL
-const pool = new Pool({
-    user: process.env.DB_USER || 'postgres',
-    host: process.env.DB_HOST || 'n8n_postgres',
-    database: process.env.DB_NAME || 'postgres',
-    password: process.env.DB_PASSWORD || '1dbf27c30ea64a151990',
-    port: process.env.DB_PORT || 5432,
-});
-
-// Configuração BucketBlaze (Backblaze B2)
-const BUCKET_CONFIG = {
-    endpoint: process.env.BLAZE_ENDPOINT_URL || 'https://s3.us-west-004.backblazeb2.com',
-    accessKey: process.env.BLAZE_ACCESS_KEY || '0052da03b06eb430000000001',
-    secretKey: process.env.BLAZE_SECRET_KEY || 'K005hvxNotXi1CiNxc+DAbdrzDXjQbE',
-    bucketName: process.env.BLAZE_BUCKET_NAME || 'Integrador'
-};
-
-// Configuração de upload
-const upload = multer({ dest: 'temp/' });
-
-// Configuração ZapperAPI
-const ZAPPER_CONFIG = {
-    apiUrl: 'https://api.zapperapi.com',
-    instanceId: process.env.ZAPPER_INSTANCE_ID,
-    apiKey: process.env.ZAPPER_API_KEY
-};
-
-// Criar tabelas se não existirem
-async function initDB() {
-    try {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS crm_conversations (
-                id SERIAL PRIMARY KEY,
-                phone VARCHAR(20) NOT NULL,
-                name VARCHAR(255),
-                last_message_at TIMESTAMP DEFAULT NOW(),
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        `);
-        
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS crm_messages (
-                id SERIAL PRIMARY KEY,
-                conversation_id INTEGER REFERENCES crm_conversations(id),
-                message_id VARCHAR(255) UNIQUE,
-                sender_phone VARCHAR(20),
-                message_text TEXT,
-                message_type VARCHAR(20) DEFAULT 'text',
-                media_url VARCHAR(500),
-                media_filename VARCHAR(255),
-                is_from_me BOOLEAN DEFAULT FALSE,
-                timestamp TIMESTAMP DEFAULT NOW(),
-                status VARCHAR(20) DEFAULT 'received'
-            )
-        `);
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS crm_webhook_config (
-                id SERIAL PRIMARY KEY,
-                webhook_url VARCHAR(500) NOT NULL,
-                secret_token VARCHAR(255),
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        `);
-        
-        console.log('✅ Banco de dados inicializado');
-    } catch (error) {
-        console.error('❌ Erro ao inicializar BD:', error);
-    }
-}
-
-// Função para upload no BucketBlaze (Backblaze B2)
-async function uploadToBucket(filePath, fileName) {
-    try {
-        const fileBuffer = fs.readFileSync(filePath);
-        
-        // Implementação básica para Backblaze B2
-        // Você pode usar a biblioteca oficial aws-sdk ou b2-sdk-js
-        const fileUrl = `${BUCKET_CONFIG.endpoint}/${BUCKET_CONFIG.bucketName}/${fileName}`;
-        
-        // TODO: Implementar upload real para Backblaze B2
-        console.log(`📦 Simulando upload: ${fileName} para ${BUCKET_CONFIG.bucketName}`);
-        
-        // Remove arquivo temporário
-        fs.unlinkSync(filePath);
-        
-        return fileUrl;
-    } catch (error) {
-        console.error('Erro no upload:', error);
-        throw error;
-    }
-}
-
-// Webhook para receber mensagens da ZapperAPI
-app.post('/webhook/zapper', async (req, res) => {
-    try {
-        console.log('📱 Webhook recebido da ZapperAPI:', JSON.stringify(req.body, null, 2));
-        
-        const data = req.body;
-        
-        // A ZapperAPI envia um array, pegar o primeiro item
-        const webhookData = Array.isArray(data) ? data[0] : data;
-        const body = webhookData.body || webhookData;
-        
-        // Verificar se é mensagem de upsert
-        if (body.type !== 'messages.upsert') {
-            console.log('⚠️ Tipo de evento ignorado:', body.type);
-            return res.json({ success: true, message: 'Evento ignorado' });
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CRM WhatsApp</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        
-        // Extrair dados da estrutura da ZapperAPI
-        const {
-            key,
-            messageTimestamp,
-            pushName,
-            message: messageObj,
-            instanceId
-        } = body;
-        
-        // Processar timestamp que pode vir como número ou objeto {low, high}
-        let timestamp;
-        if (typeof messageTimestamp === 'number') {
-            timestamp = new Date(messageTimestamp * 1000);
-        } else if (messageTimestamp && typeof messageTimestamp === 'object' && messageTimestamp.low) {
-            // Timestamp no formato {low: number, high: number}
-            timestamp = new Date(messageTimestamp.low * 1000);
-        } else {
-            // Fallback para timestamp atual
-            timestamp = new Date();
-        }
-        
-        console.log(`🕐 Timestamp processado:`, { original: messageTimestamp, processed: timestamp });
-        
-        // Extrair número do remoteJid (remove @s.whatsapp.net)
-        const phone = key.remoteJid.replace('@s.whatsapp.net', '');
-        const contactName = pushName || phone;
-        const messageId = key.id;
-        const fromMe = key.fromMe;
-        
-        if (!phone) {
-            return res.status(400).json({ error: 'Número do telefone não encontrado' });
-        }
-        
-        // Pular mensagens enviadas por nós para evitar duplicação
-        if (fromMe) {
-            console.log(`⚠️ Ignorando mensagem própria para evitar duplicação: ${messageId}`);
-            return res.json({ success: true, message: 'Mensagem própria ignorada' });
-        }
-        
-        // Extrair texto da mensagem baseado no tipo
-        let messageText = '';
-        let messageType = 'text';
-        
-        if (messageObj.conversation) {
-            // Mensagem de texto simples
-            messageText = messageObj.conversation;
-        } else if (messageObj.extendedTextMessage) {
-            // Mensagem de texto estendida (com contexto, quote, etc.)
-            messageText = messageObj.extendedTextMessage.text;
-        } else if (messageObj.imageMessage) {
-            messageType = 'image';
-            messageText = messageObj.imageMessage.caption || '📷 Imagem';
-        } else if (messageObj.videoMessage) {
-            messageType = 'video';
-            messageText = messageObj.videoMessage.caption || '🎥 Vídeo';
-        } else if (messageObj.audioMessage) {
-            messageType = 'audio';
-            messageText = '🎵 Áudio';
-        } else if (messageObj.documentMessage) {
-            messageType = 'document';
-            messageText = `📎 ${messageObj.documentMessage.fileName || 'Documento'}`;
-        } else {
-            // Tipo desconhecido
-            messageText = '📎 Mensagem não suportada';
-            console.log('🔍 Tipo de mensagem desconhecido:', Object.keys(messageObj));
-        }
-        
-        // Buscar ou criar conversa
-        let conversation = await pool.query(
-            'SELECT * FROM crm_conversations WHERE phone = $1',
-            [phone]
-        );
-        
-        if (conversation.rows.length === 0) {
-            const newConv = await pool.query(
-                'INSERT INTO crm_conversations (phone, name) VALUES ($1, $2) RETURNING *',
-                [phone, contactName]
-            );
-            conversation = newConv;
-        } else {
-            // Atualizar nome e última mensagem
-            await pool.query(
-                'UPDATE crm_conversations SET name = $1, last_message_at = NOW() WHERE phone = $2',
-                [contactName, phone]
-            );
-        }
-        
-        const convId = conversation.rows[0].id;
-        
-        // Salvar mensagem no banco
-        await pool.query(`
-            INSERT INTO crm_messages 
-            (conversation_id, message_id, sender_phone, message_text, message_type, is_from_me, timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (message_id) DO NOTHING
-        `, [
-            convId, 
-            messageId, 
-            phone, 
-            messageText, 
-            messageType,
-            fromMe,
-            timestamp // Usar timestamp processado
-        ]);
-        
-        console.log(`📱 Nova mensagem de ${contactName} (${phone}): ${messageText}`);
-        res.json({ success: true, message: 'Webhook processado com sucesso' });
-        
-    } catch (error) {
-        console.error('❌ Erro no webhook ZapperAPI:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
 
-// API para buscar conversas
-app.get('/api/conversations', async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT c.*, COUNT(m.id) as message_count
-            FROM crm_conversations c
-            LEFT JOIN crm_messages m ON c.id = m.conversation_id
-            GROUP BY c.id
-            ORDER BY c.last_message_at DESC
-        `);
-        res.json(result.rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// API para buscar mensagens de uma conversa
-app.get('/api/conversations/:id/messages', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const result = await pool.query(`
-            SELECT * FROM crm_messages 
-            WHERE conversation_id = $1 
-            ORDER BY timestamp ASC
-        `, [id]);
-        res.json(result.rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// API para enviar mensagem via ZapperAPI
-app.post('/api/send-message', async (req, res) => {
-    try {
-        const { phone, message, messageType = 'text' } = req.body;
-        
-        if (!ZAPPER_CONFIG.instanceId || !ZAPPER_CONFIG.apiKey) {
-            return res.status(500).json({ 
-                error: 'Configuração da ZapperAPI não encontrada. Verifique ZAPPER_INSTANCE_ID e ZAPPER_API_KEY' 
-            });
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f5f5f5;
+            height: 100vh;
+            overflow: hidden;
         }
-        
-        // Formatar número no padrão do WhatsApp 
-        // Testar diferentes formatos baseado no que funcionou no curl direto
-        let jid;
-        if (phone.includes('@')) {
-            jid = phone;
-        } else {
-            // Tentar o formato que funcionou no seu curl direto
-            jid = `${phone}@s.whatsapp.net`;
+
+        .container {
+            display: flex;
+            height: 100vh;
         }
-        
-        console.log(`📱 Número original: ${phone}`);
-        console.log(`📱 JID formatado: ${jid}`);
-        
-        // Montar URL da ZapperAPI (formato correto)
-        const zapperUrl = `${ZAPPER_CONFIG.apiUrl}/${ZAPPER_CONFIG.instanceId}/messages/text`;
-        
-        // Payload exato conforme documentação da ZapperAPI
-        const payload = {
-            jid: jid,
-            message: message,
-            mentions: [],
-            mentionsEveryone: false,
-            splitMessage: false,
-            processImageLink: true,
-            autoCaption: false,
-            expiration: "none"
-        };
-        
-        console.log(`📤 Enviando para ZapperAPI:`);
-        console.log(`URL: ${zapperUrl}`);
-        console.log(`JID: ${jid}`);
-        console.log(`Message: ${message}`);
-        console.log(`Instance ID: ${ZAPPER_CONFIG.instanceId}`);
-        console.log(`API Key starts with: ${ZAPPER_CONFIG.apiKey?.substring(0, 10)}...`);
-        
-        // Enviar via ZapperAPI com headers corretos
-        const response = await axios.post(zapperUrl, payload, {
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Api-Key': ZAPPER_CONFIG.apiKey
-            },
-            timeout: 30000 // 30 segundos de timeout
+
+        .sidebar {
+            width: 300px;
+            background: #ffffff;
+            border-right: 1px solid #e0e0e0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 20px;
+            background: #128c7e;
+            color: white;
+            text-align: center;
+        }
+
+        .conversations {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .conversation {
+            padding: 15px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .conversation:hover {
+            background: #f9f9f9;
+        }
+
+        .conversation.active {
+            background: #dcf8c6;
+        }
+
+        .conversation-name {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .conversation-last {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-header {
+            padding: 15px 20px;
+            background: #ededed;
+            border-bottom: 1px solid #ddd;
+            font-weight: 600;
+        }
+
+        .messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #e5ddd5;
+        }
+
+        .message {
+            max-width: 70%;
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 10px;
+            word-wrap: break-word;
+        }
+
+        .message.sent {
+            background: #dcf8c6;
+            margin-left: auto;
+            border-bottom-right-radius: 3px;
+        }
+
+        .message.received {
+            background: white;
+            border-bottom-left-radius: 3px;
+        }
+
+        .message-time {
+            font-size: 11px;
+            color: #666;
+            margin-top: 5px;
+            text-align: right;
+        }
+
+        .message-input {
+            padding: 15px 20px;
+            background: #f0f0f0;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .message-input input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            outline: none;
+        }
+
+        .btn {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 20px;
+            background: #128c7e;
+            color: white;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .btn:hover {
+            background: #075e54;
+        }
+
+        .config-btn {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            background: #34495e;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            width: 90%;
+            max-width: 500px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #666;
+            margin-top: 50px;
+        }
+
+        .media-message {
+            max-width: 250px;
+        }
+
+        .media-message img {
+            max-width: 100%;
+            border-radius: 5px;
+        }
+
+        .file-upload {
+            display: none;
+        }
+
+        .upload-btn {
+            background: #34495e;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="header">
+                <h2>💬 WhatsApp CRM</h2>
+            </div>
+            <div class="conversations" id="conversationsList">
+                <div class="empty-state">
+                    <p>Carregando conversas...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-area">
+            <div class="chat-header" id="chatHeader">
+                Selecione uma conversa
+            </div>
+            <div class="messages" id="messagesArea">
+                <div class="empty-state">
+                    <p>👈 Selecione uma conversa para começar</p>
+                </div>
+            </div>
+            <div class="message-input" id="messageInput" style="display: none;">
+                <input type="file" id="fileUpload" class="file-upload" accept="image/*,video/*,audio/*,.pdf,.doc,.docx">
+                <button class="btn upload-btn" onclick="document.getElementById('fileUpload').click()">📎</button>
+                <input type="text" id="messageText" placeholder="Digite sua mensagem..." onkeypress="handleEnter(event)">
+                <button class="btn" onclick="sendMessage()">Enviar</button>
+            </div>
+        </div>
+    </div>
+
+    <button class="config-btn" onclick="openConfig()">⚙️ Config</button>
+
+    <!-- Modal de Configuração -->
+    <div class="modal" id="configModal">
+        <div class="modal-content">
+            <h3>⚙️ Configuração de Webhook</h3>
+            <br>
+            <div class="form-group">
+                <label>URL do Webhook:</label>
+                <input type="text" id="webhookUrl" placeholder="https://sua-api.com/webhook">
+            </div>
+            <div class="form-group">
+                <label>Token Secreto (opcional):</label>
+                <input type="text" id="secretToken" placeholder="seu-token-secreto">
+            </div>
+            <br>
+            <div style="text-align: right;">
+                <button class="btn" style="background: #95a5a6; margin-right: 10px;" onclick="closeConfig()">Cancelar</button>
+                <button class="btn" onclick="saveConfig()">Salvar</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentConversation = null;
+        let conversations = [];
+        let messages = [];
+        let autoRefreshInterval = null;
+
+        // Carregar conversas
+        async function loadConversations() {
+            try {
+                const response = await fetch('/api/conversations');
+                conversations = await response.json();
+                
+                const container = document.getElementById('conversationsList');
+                
+                if (conversations.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><p>Nenhuma conversa ainda</p></div>';
+                    return;
+                }
+                
+                container.innerHTML = conversations.map(conv => `
+                    <div class="conversation" onclick="selectConversation(${conv.id}, '${conv.phone}', '${conv.name || conv.phone}')">
+                        <div class="conversation-name">${conv.name || conv.phone}</div>
+                        <div class="conversation-last">${conv.message_count} mensagens</div>
+                    </div>
+                `).join('');
+                
+            } catch (error) {
+                console.error('Erro ao carregar conversas:', error);
+            }
+        }
+
+        // Selecionar conversa
+        async function selectConversation(id, phone, name) {
+            currentConversation = { id, phone, name };
+            
+            // Parar auto-refresh anterior se houver
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+            
+            // Atualizar interface
+            document.getElementById('chatHeader').textContent = name;
+            document.getElementById('messageInput').style.display = 'flex';
+            
+            // Destacar conversa ativa
+            document.querySelectorAll('.conversation').forEach(el => el.classList.remove('active'));
+            event.target.closest('.conversation').classList.add('active');
+            
+            // Carregar mensagens
+            await loadMessages(id);
+            
+            // Iniciar auto-refresh das mensagens a cada 3 segundos
+            autoRefreshInterval = setInterval(() => {
+                loadMessages(id);
+            }, 3000);
+        }
+
+        // Carregar mensagens
+        async function loadMessages(conversationId) {
+            try {
+                const response = await fetch(`/api/conversations/${conversationId}/messages`);
+                const newMessages = await response.json();
+                
+                const container = document.getElementById('messagesArea');
+                
+                if (newMessages.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><p>Nenhuma mensagem ainda</p></div>';
+                    return;
+                }
+                
+                // Verificar se precisa atualizar (evitar scroll jumping)
+                const shouldScrollToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 100;
+                
+                container.innerHTML = newMessages.map(msg => {
+                    const time = new Date(msg.timestamp).toLocaleString('pt-BR', {
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                    
+                    let content = '';
+                    
+                    if (msg.message_type === 'text') {
+                        content = `<div>${msg.message_text}</div>`;
+                    } else if (msg.message_type === 'image') {
+                        content = `
+                            <div class="media-message">
+                                <img src="${msg.media_url}" alt="Imagem">
+                                ${msg.message_text ? `<div>${msg.message_text}</div>` : ''}
+                            </div>
+                        `;
+                    } else {
+                        content = `
+                            <div>📎 ${msg.media_filename || 'Arquivo'}</div>
+                            ${msg.message_text ? `<div>${msg.message_text}</div>` : ''}
+                        `;
+                    }
+                    
+                    return `
+                        <div class="message ${msg.is_from_me ? 'sent' : 'received'}">
+                            ${content}
+                            <div class="message-time">${time}</div>
+                        </div>
+                    `;
+                }).join('');
+                
+                // Scroll para o final apenas se estava perto do final
+                if (shouldScrollToBottom) {
+                    container.scrollTop = container.scrollHeight;
+                }
+                
+                // Atualizar array de mensagens
+                messages = newMessages;
+                
+            } catch (error) {
+                console.error('Erro ao carregar mensagens:', error);
+            }
+        }
+
+        // Enviar mensagem
+        async function sendMessage() {
+            const input = document.getElementById('messageText');
+            const message = input.value.trim();
+            
+            console.log('📤 Tentando enviar:', { message, currentConversation });
+            
+            if (!message || !currentConversation) {
+                console.log('❌ Mensagem vazia ou conversa não selecionada');
+                return;
+            }
+            
+            // Desabilitar botão temporariamente
+            const sendBtn = document.querySelector('button[onclick="sendMessage()"]');
+            if (sendBtn) {
+                sendBtn.disabled = true;
+                sendBtn.textContent = 'Enviando...';
+            }
+            
+            try {
+                console.log('🚀 Fazendo requisição para:', '/api/send-message');
+                
+                const response = await fetch('/api/send-message', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        phone: currentConversation.phone,
+                        message: message
+                    })
+                });
+                
+                console.log('📡 Resposta recebida:', response.status);
+                
+                const result = await response.json();
+                console.log('📄 Dados da resposta:', result);
+                
+                if (response.ok && result.success) {
+                    console.log('✅ Mensagem enviada com sucesso');
+                    input.value = '';
+                    await loadMessages(currentConversation.id);
+                    await loadConversations(); // Atualizar lista
+                } else {
+                    console.error('❌ Erro na resposta:', result);
+                    alert('Erro ao enviar mensagem: ' + (result.error || 'Erro desconhecido'));
+                }
+                
+            } catch (error) {
+                console.error('❌ Erro na requisição:', error);
+                alert('Erro ao enviar mensagem: ' + error.message);
+            } finally {
+                // Reabilitar botão
+                if (sendBtn) {
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Enviar';
+                }
+            }
+        }
+
+        // Enter para enviar
+        function handleEnter(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        // Upload de arquivo
+        document.getElementById('fileUpload').addEventListener('change', async function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const formData = new FormData();
+            formData.append('media', file);
+            
+            try {
+                const response = await fetch('/api/upload-media', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Enviar mensagem com mídia
+                    await fetch('/api/send-message', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            phone: currentConversation.phone,
+                            message: '',
+                            messageType: file.type.startsWith('image/') ? 'image' : 'document',
+                            mediaUrl: result.mediaUrl,
+                            fileName: result.fileName
+                        })
+                    });
+                    
+                    await loadMessages(currentConversation.id);
+                }
+                
+            } catch (error) {
+                console.error('Erro no upload:', error);
+                alert('Erro ao enviar arquivo');
+            }
         });
-        
-        console.log(`✅ Resposta da ZapperAPI:`, response.data);
-        
-        // Salvar mensagem enviada no banco
-        let conversation = await pool.query('SELECT * FROM crm_conversations WHERE phone = $1', [phone.replace('@s.whatsapp.net', '')]);
-        if (conversation.rows.length === 0) {
-            const newConv = await pool.query(
-                'INSERT INTO crm_conversations (phone, name) VALUES ($1, $2) RETURNING *',
-                [phone.replace('@s.whatsapp.net', ''), phone.replace('@s.whatsapp.net', '')]
-            );
-            conversation = newConv;
+
+        // Configuração
+        function openConfig() {
+            document.getElementById('configModal').style.display = 'flex';
         }
-        
-        await pool.query(`
-            INSERT INTO crm_messages 
-            (conversation_id, message_id, sender_phone, message_text, message_type, is_from_me, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-        `, [
-            conversation.rows[0].id, 
-            response.data.key || `sent_${Date.now()}`, 
-            phone.replace('@s.whatsapp.net', ''), 
-            message, 
-            messageType, 
-            true, 
-            'sent'
-        ]);
-        
-        res.json({ 
-            success: true, 
-            message: 'Mensagem enviada via ZapperAPI', 
-            zapperResponse: response.data 
-        });
-        
-    } catch (error) {
-        console.error('❌ Erro ao enviar via ZapperAPI:', error.response?.data || error.message);
-        res.status(500).json({ 
-            error: 'Erro ao enviar mensagem', 
-            details: error.response?.data || error.message 
-        });
-    }
-});
 
-// API para configurar webhook
-app.post('/api/webhook-config', async (req, res) => {
-    try {
-        const { webhookUrl, secretToken } = req.body;
-        
-        await pool.query(`
-            INSERT INTO crm_webhook_config (webhook_url, secret_token) 
-            VALUES ($1, $2)
-            ON CONFLICT (id) DO UPDATE SET 
-            webhook_url = $1, secret_token = $2, created_at = NOW()
-        `, [webhookUrl, secretToken]);
-        
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Upload de mídia
-app.post('/api/upload-media', upload.single('media'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+        function closeConfig() {
+            document.getElementById('configModal').style.display = 'none';
         }
-        
-        const fileName = `${Date.now()}_${req.file.originalname}`;
-        const mediaUrl = await uploadToBucket(req.file.path, fileName);
-        
-        res.json({ 
-            success: true, 
-            mediaUrl, 
-            fileName: req.file.originalname 
+
+        async function saveConfig() {
+            const webhookUrl = document.getElementById('webhookUrl').value;
+            const secretToken = document.getElementById('secretToken').value;
+            
+            try {
+                const response = await fetch('/api/webhook-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ webhookUrl, secretToken })
+                });
+                
+                if (response.ok) {
+                    alert('Configuração salva!');
+                    closeConfig();
+                }
+                
+            } catch (error) {
+                console.error('Erro ao salvar config:', error);
+                alert('Erro ao salvar configuração');
+            }
+        }
+
+        // Atualizar conversas a cada 5 segundos
+        setInterval(loadConversations, 5000);
+
+        // Carregar dados iniciais
+        loadConversations();
+
+        // Limpar intervalos quando a página for fechada
+        window.addEventListener('beforeunload', () => {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
         });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Servir a interface
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// Inicializar
-initDB();
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Servidor rodando na porta ${PORT}`);
-    console.log(`📱 Webhook ZapperAPI: http://localhost:${PORT}/webhook/zapper`);
-    console.log(`⚙️  Configurações necessárias:`);
-    console.log(`   - ZAPPER_INSTANCE_ID: ${ZAPPER_CONFIG.instanceId || 'NÃO CONFIGURADO'}`);
-    console.log(`   - ZAPPER_API_KEY: ${ZAPPER_CONFIG.apiKey ? '✅ Configurado' : '❌ NÃO CONFIGURADO'}`);
-});
-
-// Tratar fechamento graceful
-process.on('SIGINT', async () => {
-    await pool.end();
-    process.exit(0);
-});
+    </script>
+</body>
+</html>

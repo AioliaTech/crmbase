@@ -13,18 +13,18 @@ app.use(express.static('public'));
 // Configuração PostgreSQL
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
-    host: process.env.DB_HOST || 'localhost',
-    database: process.env.DB_NAME || 'crm_whatsapp',
-    password: process.env.DB_PASSWORD || 'password',
+    host: process.env.DB_HOST || 'n8n_postgres',
+    database: process.env.DB_NAME || 'postgres',
+    password: process.env.DB_PASSWORD || '1dbf27c30ea64a151990',
     port: process.env.DB_PORT || 5432,
 });
 
-// Configuração BucketBlaze
+// Configuração BucketBlaze (Backblaze B2)
 const BUCKET_CONFIG = {
-    endpoint: process.env.BUCKET_ENDPOINT,
-    accessKey: process.env.BUCKET_ACCESS_KEY,
-    secretKey: process.env.BUCKET_SECRET_KEY,
-    bucketName: process.env.BUCKET_NAME
+    endpoint: process.env.BLAZE_ENDPOINT_URL || 'https://s3.us-west-004.backblazeb2.com',
+    accessKey: process.env.BLAZE_ACCESS_KEY || '0052da03b06eb430000000001',
+    secretKey: process.env.BLAZE_SECRET_KEY || 'K005hvxNotXi1CiNxc+DAbdrzDXjQbE',
+    bucketName: process.env.BLAZE_BUCKET_NAME || 'Integrador'
 };
 
 // Configuração de upload
@@ -34,7 +34,7 @@ const upload = multer({ dest: 'temp/' });
 async function initDB() {
     try {
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS conversations (
+            CREATE TABLE IF NOT EXISTS crm_conversations (
                 id SERIAL PRIMARY KEY,
                 phone VARCHAR(20) NOT NULL,
                 name VARCHAR(255),
@@ -44,9 +44,9 @@ async function initDB() {
         `);
         
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS messages (
+            CREATE TABLE IF NOT EXISTS crm_messages (
                 id SERIAL PRIMARY KEY,
-                conversation_id INTEGER REFERENCES conversations(id),
+                conversation_id INTEGER REFERENCES crm_conversations(id),
                 message_id VARCHAR(255) UNIQUE,
                 sender_phone VARCHAR(20),
                 message_text TEXT,
@@ -60,7 +60,7 @@ async function initDB() {
         `);
 
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS webhook_config (
+            CREATE TABLE IF NOT EXISTS crm_webhook_config (
                 id SERIAL PRIMARY KEY,
                 webhook_url VARCHAR(500) NOT NULL,
                 secret_token VARCHAR(255),
@@ -75,14 +75,17 @@ async function initDB() {
     }
 }
 
-// Função para upload no BucketBlaze
+// Função para upload no BucketBlaze (Backblaze B2)
 async function uploadToBucket(filePath, fileName) {
     try {
         const fileBuffer = fs.readFileSync(filePath);
         
-        // Aqui você implementaria o upload específico do BucketBlaze
-        // Por enquanto simulando a URL de retorno
+        // Implementação básica para Backblaze B2
+        // Você pode usar a biblioteca oficial aws-sdk ou b2-sdk-js
         const fileUrl = `${BUCKET_CONFIG.endpoint}/${BUCKET_CONFIG.bucketName}/${fileName}`;
+        
+        // TODO: Implementar upload real para Backblaze B2
+        console.log(`📦 Simulando upload: ${fileName} para ${BUCKET_CONFIG.bucketName}`);
         
         // Remove arquivo temporário
         fs.unlinkSync(filePath);
@@ -101,20 +104,20 @@ app.post('/webhook/whatsapp', async (req, res) => {
         
         // Buscar ou criar conversa
         let conversation = await pool.query(
-            'SELECT * FROM conversations WHERE phone = $1',
+            'SELECT * FROM crm_conversations WHERE phone = $1',
             [phone]
         );
         
         if (conversation.rows.length === 0) {
             const newConv = await pool.query(
-                'INSERT INTO conversations (phone, name) VALUES ($1, $2) RETURNING *',
+                'INSERT INTO crm_conversations (phone, name) VALUES ($1, $2) RETURNING *',
                 [phone, phone]
             );
             conversation = newConv;
         } else {
             // Atualizar última mensagem
             await pool.query(
-                'UPDATE conversations SET last_message_at = NOW() WHERE phone = $1',
+                'UPDATE crm_conversations SET last_message_at = NOW() WHERE phone = $1',
                 [phone]
             );
         }
@@ -123,7 +126,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         
         // Salvar mensagem
         await pool.query(`
-            INSERT INTO messages 
+            INSERT INTO crm_messages 
             (conversation_id, message_id, sender_phone, message_text, message_type, media_url, media_filename, is_from_me)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `, [convId, messageId, phone, message, messageType, mediaUrl, fileName, fromMe]);
@@ -142,8 +145,8 @@ app.get('/api/conversations', async (req, res) => {
     try {
         const result = await pool.query(`
             SELECT c.*, COUNT(m.id) as message_count
-            FROM conversations c
-            LEFT JOIN messages m ON c.id = m.conversation_id
+            FROM crm_conversations c
+            LEFT JOIN crm_messages m ON c.id = m.conversation_id
             GROUP BY c.id
             ORDER BY c.last_message_at DESC
         `);
@@ -158,7 +161,7 @@ app.get('/api/conversations/:id/messages', async (req, res) => {
     try {
         const { id } = req.params;
         const result = await pool.query(`
-            SELECT * FROM messages 
+            SELECT * FROM crm_messages 
             WHERE conversation_id = $1 
             ORDER BY timestamp ASC
         `, [id]);
@@ -182,17 +185,17 @@ app.post('/api/send-message', async (req, res) => {
         console.log(`📤 Enviando para ${phone}: ${message}`);
         
         // Salvar mensagem enviada no banco
-        let conversation = await pool.query('SELECT * FROM conversations WHERE phone = $1', [phone]);
+        let conversation = await pool.query('SELECT * FROM crm_conversations WHERE phone = $1', [phone]);
         if (conversation.rows.length === 0) {
             const newConv = await pool.query(
-                'INSERT INTO conversations (phone, name) VALUES ($1, $2) RETURNING *',
+                'INSERT INTO crm_conversations (phone, name) VALUES ($1, $2) RETURNING *',
                 [phone, phone]
             );
             conversation = newConv;
         }
         
         await pool.query(`
-            INSERT INTO messages 
+            INSERT INTO crm_messages 
             (conversation_id, sender_phone, message_text, message_type, is_from_me, status)
             VALUES ($1, $2, $3, $4, $5, $6)
         `, [conversation.rows[0].id, phone, message, messageType, true, 'sent']);
@@ -210,7 +213,7 @@ app.post('/api/webhook-config', async (req, res) => {
         const { webhookUrl, secretToken } = req.body;
         
         await pool.query(`
-            INSERT INTO webhook_config (webhook_url, secret_token) 
+            INSERT INTO crm_webhook_config (webhook_url, secret_token) 
             VALUES ($1, $2)
             ON CONFLICT (id) DO UPDATE SET 
             webhook_url = $1, secret_token = $2, created_at = NOW()

@@ -30,6 +30,13 @@ const BUCKET_CONFIG = {
 // Configuração de upload
 const upload = multer({ dest: 'temp/' });
 
+// Configuração ZapperAPI
+const ZAPPER_CONFIG = {
+    apiUrl: 'https://api.zapperapi.com',
+    instanceId: process.env.ZAPPER_INSTANCE_ID,
+    apiKey: process.env.ZAPPER_API_KEY
+};
+
 // Criar tabelas se não existirem
 async function initDB() {
     try {
@@ -97,10 +104,34 @@ async function uploadToBucket(filePath, fileName) {
     }
 }
 
-// Webhook para receber mensagens do WhatsApp
-app.post('/webhook/whatsapp', async (req, res) => {
+// Webhook para receber mensagens da ZapperAPI
+app.post('/webhook/zapper', async (req, res) => {
     try {
-        const { phone, message, messageId, messageType, mediaUrl, fileName, fromMe } = req.body;
+        console.log('📱 Webhook recebido da ZapperAPI:', JSON.stringify(req.body, null, 2));
+        
+        const data = req.body;
+        
+        // Estrutura típica da ZapperAPI para mensagens recebidas
+        const {
+            key,           // ID da mensagem
+            pushName,      // Nome do contato
+            message,       // Conteúdo da mensagem
+            fromMe,        // Se foi enviada por nós
+            participant,   // Número do participante
+            type,          // Tipo: text, image, video, audio, document
+            mediaUrl,      // URL da mídia
+            caption,       // Legenda da mídia
+            timestamp,     // Timestamp
+            chatId         // ID do chat (número formatado)
+        } = data;
+        
+        // Extrair número limpo do chatId (remove @c.us)
+        const phone = chatId ? chatId.replace('@c.us', '') : participant;
+        const contactName = pushName || phone;
+        
+        if (!phone) {
+            return res.status(400).json({ error: 'Número do telefone não encontrado' });
+        }
         
         // Buscar ou criar conversa
         let conversation = await pool.query(
@@ -111,31 +142,50 @@ app.post('/webhook/whatsapp', async (req, res) => {
         if (conversation.rows.length === 0) {
             const newConv = await pool.query(
                 'INSERT INTO crm_conversations (phone, name) VALUES ($1, $2) RETURNING *',
-                [phone, phone]
+                [phone, contactName]
             );
             conversation = newConv;
         } else {
-            // Atualizar última mensagem
+            // Atualizar nome se vier diferente e última mensagem
             await pool.query(
-                'UPDATE crm_conversations SET last_message_at = NOW() WHERE phone = $1',
-                [phone]
+                'UPDATE crm_conversations SET name = $1, last_message_at = NOW() WHERE phone = $2',
+                [contactName, phone]
             );
         }
         
         const convId = conversation.rows[0].id;
         
-        // Salvar mensagem
+        // Definir texto da mensagem baseado no tipo
+        let messageText = '';
+        if (type === 'text') {
+            messageText = message || caption || '';
+        } else {
+            messageText = caption || `📎 ${type.toUpperCase()}`;
+        }
+        
+        // Salvar mensagem no banco
         await pool.query(`
             INSERT INTO crm_messages 
-            (conversation_id, message_id, sender_phone, message_text, message_type, media_url, media_filename, is_from_me)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        `, [convId, messageId, phone, message, messageType, mediaUrl, fileName, fromMe]);
+            (conversation_id, message_id, sender_phone, message_text, message_type, media_url, media_filename, is_from_me, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (message_id) DO NOTHING
+        `, [
+            convId, 
+            key, 
+            phone, 
+            messageText, 
+            type || 'text', 
+            mediaUrl, 
+            null,
+            fromMe || false,
+            new Date(timestamp * 1000) // Converter timestamp Unix para Date
+        ]);
         
-        console.log(`📱 Nova mensagem de ${phone}: ${message || 'mídia'}`);
-        res.json({ success: true });
+        console.log(`📱 Nova mensagem de ${contactName} (${phone}): ${messageText || 'mídia'}`);
+        res.json({ success: true, message: 'Webhook processado com sucesso' });
         
     } catch (error) {
-        console.error('Erro no webhook:', error);
+        console.error('Erro no webhook ZapperAPI:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -171,39 +221,83 @@ app.get('/api/conversations/:id/messages', async (req, res) => {
     }
 });
 
-// API para enviar mensagem
+// API para enviar mensagem via ZapperAPI
 app.post('/api/send-message', async (req, res) => {
     try {
         const { phone, message, messageType = 'text' } = req.body;
         
-        // Aqui você faria a chamada para sua API do WhatsApp
-        // const response = await axios.post('SUA_API_WHATSAPP/send', {
-        //     phone, message, messageType
-        // });
+        if (!ZAPPER_CONFIG.instanceId || !ZAPPER_CONFIG.apiKey) {
+            return res.status(500).json({ 
+                error: 'Configuração da ZapperAPI não encontrada. Verifique ZAPPER_INSTANCE_ID e ZAPPER_API_KEY' 
+            });
+        }
         
-        // Simular envio por enquanto
-        console.log(`📤 Enviando para ${phone}: ${message}`);
+        // Formatar número no padrão do WhatsApp (adicionar @c.us se necessário)
+        const jid = phone.includes('@') ? phone : `${phone}@c.us`;
+        
+        // Montar URL da ZapperAPI
+        const zapperUrl = `${ZAPPER_CONFIG.apiUrl}/${ZAPPER_CONFIG.instanceId}/messages/text`;
+        
+        // Payload para ZapperAPI
+        const payload = {
+            jid: jid,
+            message: message,
+            mentions: [],
+            mentionsEveryone: false,
+            splitMessage: false,
+            processImageLink: true,
+            autoCaption: false,
+            expiration: "none"
+        };
+        
+        console.log(`📤 Enviando para ZapperAPI:`, { url: zapperUrl, payload });
+        
+        // Enviar via ZapperAPI
+        const response = await axios.post(zapperUrl, payload, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Api-Key': ZAPPER_CONFIG.apiKey
+            }
+        });
+        
+        console.log(`✅ Resposta da ZapperAPI:`, response.data);
         
         // Salvar mensagem enviada no banco
-        let conversation = await pool.query('SELECT * FROM crm_conversations WHERE phone = $1', [phone]);
+        let conversation = await pool.query('SELECT * FROM crm_conversations WHERE phone = $1', [phone.replace('@c.us', '')]);
         if (conversation.rows.length === 0) {
             const newConv = await pool.query(
                 'INSERT INTO crm_conversations (phone, name) VALUES ($1, $2) RETURNING *',
-                [phone, phone]
+                [phone.replace('@c.us', ''), phone.replace('@c.us', '')]
             );
             conversation = newConv;
         }
         
         await pool.query(`
             INSERT INTO crm_messages 
-            (conversation_id, sender_phone, message_text, message_type, is_from_me, status)
-            VALUES ($1, $2, $3, $4, $5, $6)
-        `, [conversation.rows[0].id, phone, message, messageType, true, 'sent']);
+            (conversation_id, message_id, sender_phone, message_text, message_type, is_from_me, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [
+            conversation.rows[0].id, 
+            response.data.key || `sent_${Date.now()}`, 
+            phone.replace('@c.us', ''), 
+            message, 
+            messageType, 
+            true, 
+            'sent'
+        ]);
         
-        res.json({ success: true, message: 'Mensagem enviada' });
+        res.json({ 
+            success: true, 
+            message: 'Mensagem enviada via ZapperAPI', 
+            zapperResponse: response.data 
+        });
         
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('❌ Erro ao enviar via ZapperAPI:', error.response?.data || error.message);
+        res.status(500).json({ 
+            error: 'Erro ao enviar mensagem', 
+            details: error.response?.data || error.message 
+        });
     }
 });
 
@@ -257,7 +351,10 @@ initDB();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
-    console.log(`📱 Webhook endpoint: http://localhost:${PORT}/webhook/whatsapp`);
+    console.log(`📱 Webhook ZapperAPI: http://localhost:${PORT}/webhook/zapper`);
+    console.log(`⚙️  Configurações necessárias:`);
+    console.log(`   - ZAPPER_INSTANCE_ID: ${ZAPPER_CONFIG.instanceId || 'NÃO CONFIGURADO'}`);
+    console.log(`   - ZAPPER_API_KEY: ${ZAPPER_CONFIG.apiKey ? '✅ Configurado' : '❌ NÃO CONFIGURADO'}`);
 });
 
 // Tratar fechamento graceful

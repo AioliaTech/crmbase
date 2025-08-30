@@ -130,6 +130,20 @@ app.post('/webhook/zapper', async (req, res) => {
             instanceId
         } = body;
         
+        // Processar timestamp que pode vir como número ou objeto {low, high}
+        let timestamp;
+        if (typeof messageTimestamp === 'number') {
+            timestamp = new Date(messageTimestamp * 1000);
+        } else if (messageTimestamp && typeof messageTimestamp === 'object' && messageTimestamp.low) {
+            // Timestamp no formato {low: number, high: number}
+            timestamp = new Date(messageTimestamp.low * 1000);
+        } else {
+            // Fallback para timestamp atual
+            timestamp = new Date();
+        }
+        
+        console.log(`🕐 Timestamp processado:`, { original: messageTimestamp, processed: timestamp });
+        
         // Extrair número do remoteJid (remove @s.whatsapp.net)
         const phone = key.remoteJid.replace('@s.whatsapp.net', '');
         const contactName = pushName || phone;
@@ -203,7 +217,7 @@ app.post('/webhook/zapper', async (req, res) => {
             messageText, 
             messageType,
             fromMe,
-            new Date(messageTimestamp * 1000) // Converter timestamp Unix para Date
+            timestamp // Usar timestamp processado
         ]);
         
         console.log(`📱 Nova mensagem de ${contactName} (${phone}): ${messageText}`);
@@ -275,21 +289,20 @@ app.post('/api/send-message', async (req, res) => {
             expiration: "none"
         };
         
-        console.log(`📤 Enviando para ZapperAPI:`, { 
-            url: zapperUrl, 
-            payload,
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Api-Key': ZAPPER_CONFIG.apiKey
-            }
-        });
+        console.log(`📤 Enviando para ZapperAPI:`);
+        console.log(`URL: ${zapperUrl}`);
+        console.log(`JID: ${jid}`);
+        console.log(`Message: ${message}`);
+        console.log(`Instance ID: ${ZAPPER_CONFIG.instanceId}`);
+        console.log(`API Key starts with: ${ZAPPER_CONFIG.apiKey?.substring(0, 10)}...`);
         
         // Enviar via ZapperAPI com headers corretos
         const response = await axios.post(zapperUrl, payload, {
             headers: {
                 'Content-Type': 'application/json',
                 'X-Api-Key': ZAPPER_CONFIG.apiKey
-            }
+            },
+            timeout: 30000 // 30 segundos de timeout
         });
         
         console.log(`✅ Resposta da ZapperAPI:`, response.data);

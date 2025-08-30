@@ -359,14 +359,38 @@
                     } else if (msg.message_type === 'image') {
                         content = `
                             <div class="media-message">
-                                <img src="${msg.media_url}" alt="Imagem">
-                                ${msg.message_text ? `<div>${msg.message_text}</div>` : ''}
+                                ${msg.media_url ? `
+                                    <img src="${msg.media_url}" 
+                                         alt="Imagem" 
+                                         style="max-width: 200px; border-radius: 8px;"
+                                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                    <div style="display:none; padding: 10px; background: #f0f0f0; border-radius: 5px;">
+                                        📷 Imagem (erro no carregamento)
+                                        <br><small>URL: ${msg.media_url}</small>
+                                    </div>
+                                ` : '<div style="padding: 10px; background: #f0f0f0; border-radius: 5px;">📷 Imagem (sem URL)</div>'}
+                                ${msg.message_text ? `<div style="margin-top: 5px;">${msg.message_text}</div>` : ''}
+                            </div>
+                        `;
+                    } else if (msg.message_type === 'video') {
+                        content = `
+                            <div class="media-message">
+                                ${msg.media_url ? `<video controls style="max-width: 200px; border-radius: 8px;"><source src="${msg.media_url}" type="video/mp4"></video>` : ''}
+                                ${msg.message_text && msg.message_text !== '🎥 Vídeo' ? `<div style="margin-top: 5px;">${msg.message_text}</div>` : ''}
+                                ${!msg.media_url ? '<div>🎥 Vídeo</div>' : ''}
+                            </div>
+                        `;
+                    } else if (msg.message_type === 'audio') {
+                        content = `
+                            <div class="media-message">
+                                ${msg.media_url ? `<audio controls><source src="${msg.media_url}" type="audio/mpeg"></audio>` : ''}
+                                <div>🎵 Áudio</div>
                             </div>
                         `;
                     } else {
                         content = `
-                            <div>📎 ${msg.media_filename || 'Arquivo'}</div>
-                            ${msg.message_text ? `<div>${msg.message_text}</div>` : ''}
+                            <div>📎 ${msg.media_filename || msg.message_text || 'Arquivo'}</div>
+                            ${msg.media_url ? `<div><a href="${msg.media_url}" target="_blank">Baixar arquivo</a></div>` : ''}
                         `;
                     }
                     
@@ -465,33 +489,64 @@
             formData.append('media', file);
             
             try {
+                console.log('Fazendo upload do arquivo:', file.name);
+                
                 const response = await fetch('/api/upload-media', {
                     method: 'POST',
                     body: formData
                 });
                 
                 const result = await response.json();
+                console.log('Resultado do upload:', result);
                 
                 if (result.success) {
+                    // Determinar tipo de mensagem baseado no arquivo
+                    let messageType = 'document';
+                    if (file.type.startsWith('image/')) {
+                        messageType = 'image';
+                    } else if (file.type.startsWith('video/')) {
+                        messageType = 'video';
+                    } else if (file.type.startsWith('audio/')) {
+                        messageType = 'audio';
+                    }
+                    
+                    console.log('Enviando mídia via API:', {
+                        phone: currentConversation.phone,
+                        message: `📎 ${result.fileName}`,
+                        messageType: messageType,
+                        mediaUrl: result.mediaUrl
+                    });
+                    
                     // Enviar mensagem com mídia
-                    await fetch('/api/send-message', {
+                    const sendResponse = await fetch('/api/send-message', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             phone: currentConversation.phone,
-                            message: '',
-                            messageType: file.type.startsWith('image/') ? 'image' : 'document',
-                            mediaUrl: result.mediaUrl,
-                            fileName: result.fileName
+                            message: messageType === 'image' ? '' : `📎 ${result.fileName}`,
+                            messageType: messageType,
+                            mediaUrl: result.mediaUrl
                         })
                     });
                     
-                    await loadMessages(currentConversation.id);
+                    const sendResult = await sendResponse.json();
+                    console.log('Resultado do envio:', sendResult);
+                    
+                    if (sendResult.success) {
+                        await loadMessages(currentConversation.id);
+                    } else {
+                        alert('Erro ao enviar arquivo: ' + sendResult.error);
+                    }
+                } else {
+                    alert('Erro no upload: ' + result.error);
                 }
                 
             } catch (error) {
                 console.error('Erro no upload:', error);
                 alert('Erro ao enviar arquivo');
+            } finally {
+                // Limpar input
+                event.target.value = '';
             }
         });
 

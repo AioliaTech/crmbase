@@ -277,6 +277,7 @@
         let currentConversation = null;
         let conversations = [];
         let messages = [];
+        let autoRefreshInterval = null;
 
         // Carregar conversas
         async function loadConversations() {
@@ -307,6 +308,11 @@
         async function selectConversation(id, phone, name) {
             currentConversation = { id, phone, name };
             
+            // Parar auto-refresh anterior se houver
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+            
             // Atualizar interface
             document.getElementById('chatHeader').textContent = name;
             document.getElementById('messageInput').style.display = 'flex';
@@ -317,22 +323,30 @@
             
             // Carregar mensagens
             await loadMessages(id);
+            
+            // Iniciar auto-refresh das mensagens a cada 3 segundos
+            autoRefreshInterval = setInterval(() => {
+                loadMessages(id);
+            }, 3000);
         }
 
         // Carregar mensagens
         async function loadMessages(conversationId) {
             try {
                 const response = await fetch(`/api/conversations/${conversationId}/messages`);
-                messages = await response.json();
+                const newMessages = await response.json();
                 
                 const container = document.getElementById('messagesArea');
                 
-                if (messages.length === 0) {
+                if (newMessages.length === 0) {
                     container.innerHTML = '<div class="empty-state"><p>Nenhuma mensagem ainda</p></div>';
                     return;
                 }
                 
-                container.innerHTML = messages.map(msg => {
+                // Verificar se precisa atualizar (evitar scroll jumping)
+                const shouldScrollToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 100;
+                
+                container.innerHTML = newMessages.map(msg => {
                     const time = new Date(msg.timestamp).toLocaleString('pt-BR', {
                         hour: '2-digit',
                         minute: '2-digit'
@@ -364,8 +378,13 @@
                     `;
                 }).join('');
                 
-                // Scroll para o final
-                container.scrollTop = container.scrollHeight;
+                // Scroll para o final apenas se estava perto do final
+                if (shouldScrollToBottom) {
+                    container.scrollTop = container.scrollHeight;
+                }
+                
+                // Atualizar array de mensagens
+                messages = newMessages;
                 
             } catch (error) {
                 console.error('Erro ao carregar mensagens:', error);
@@ -507,11 +526,18 @@
             }
         }
 
-        // Atualizar conversas a cada 10 segundos
-        setInterval(loadConversations, 10000);
+        // Atualizar conversas a cada 5 segundos
+        setInterval(loadConversations, 5000);
 
         // Carregar dados iniciais
         loadConversations();
+
+        // Limpar intervalos quando a página for fechada
+        window.addEventListener('beforeunload', () => {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+        });
     </script>
 </body>
 </html>

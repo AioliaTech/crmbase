@@ -111,26 +111,61 @@ app.post('/webhook/zapper', async (req, res) => {
         
         const data = req.body;
         
-        // Estrutura típica da ZapperAPI para mensagens recebidas
-        const {
-            key,           // ID da mensagem
-            pushName,      // Nome do contato
-            message,       // Conteúdo da mensagem
-            fromMe,        // Se foi enviada por nós
-            participant,   // Número do participante
-            type,          // Tipo: text, image, video, audio, document
-            mediaUrl,      // URL da mídia
-            caption,       // Legenda da mídia
-            timestamp,     // Timestamp
-            chatId         // ID do chat (número formatado)
-        } = data;
+        // A ZapperAPI envia um array, pegar o primeiro item
+        const webhookData = Array.isArray(data) ? data[0] : data;
+        const body = webhookData.body || webhookData;
         
-        // Extrair número limpo do chatId (remove @c.us)
-        const phone = chatId ? chatId.replace('@c.us', '') : participant;
+        // Verificar se é mensagem de upsert
+        if (body.type !== 'messages.upsert') {
+            console.log('⚠️ Tipo de evento ignorado:', body.type);
+            return res.json({ success: true, message: 'Evento ignorado' });
+        }
+        
+        // Extrair dados da estrutura da ZapperAPI
+        const {
+            key,
+            messageTimestamp,
+            pushName,
+            message: messageObj,
+            instanceId
+        } = body;
+        
+        // Extrair número do remoteJid (remove @s.whatsapp.net)
+        const phone = key.remoteJid.replace('@s.whatsapp.net', '');
         const contactName = pushName || phone;
+        const messageId = key.id;
+        const fromMe = key.fromMe;
         
         if (!phone) {
             return res.status(400).json({ error: 'Número do telefone não encontrado' });
+        }
+        
+        // Extrair texto da mensagem baseado no tipo
+        let messageText = '';
+        let messageType = 'text';
+        
+        if (messageObj.conversation) {
+            // Mensagem de texto simples
+            messageText = messageObj.conversation;
+        } else if (messageObj.extendedTextMessage) {
+            // Mensagem de texto estendida (com contexto, quote, etc.)
+            messageText = messageObj.extendedTextMessage.text;
+        } else if (messageObj.imageMessage) {
+            messageType = 'image';
+            messageText = messageObj.imageMessage.caption || '📷 Imagem';
+        } else if (messageObj.videoMessage) {
+            messageType = 'video';
+            messageText = messageObj.videoMessage.caption || '🎥 Vídeo';
+        } else if (messageObj.audioMessage) {
+            messageType = 'audio';
+            messageText = '🎵 Áudio';
+        } else if (messageObj.documentMessage) {
+            messageType = 'document';
+            messageText = `📎 ${messageObj.documentMessage.fileName || 'Documento'}`;
+        } else {
+            // Tipo desconhecido
+            messageText = '📎 Mensagem não suportada';
+            console.log('🔍 Tipo de mensagem desconhecido:', Object.keys(messageObj));
         }
         
         // Buscar ou criar conversa
@@ -146,7 +181,7 @@ app.post('/webhook/zapper', async (req, res) => {
             );
             conversation = newConv;
         } else {
-            // Atualizar nome se vier diferente e última mensagem
+            // Atualizar nome e última mensagem
             await pool.query(
                 'UPDATE crm_conversations SET name = $1, last_message_at = NOW() WHERE phone = $2',
                 [contactName, phone]
@@ -155,37 +190,27 @@ app.post('/webhook/zapper', async (req, res) => {
         
         const convId = conversation.rows[0].id;
         
-        // Definir texto da mensagem baseado no tipo
-        let messageText = '';
-        if (type === 'text') {
-            messageText = message || caption || '';
-        } else {
-            messageText = caption || `📎 ${type.toUpperCase()}`;
-        }
-        
         // Salvar mensagem no banco
         await pool.query(`
             INSERT INTO crm_messages 
-            (conversation_id, message_id, sender_phone, message_text, message_type, media_url, media_filename, is_from_me, timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (conversation_id, message_id, sender_phone, message_text, message_type, is_from_me, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (message_id) DO NOTHING
         `, [
             convId, 
-            key, 
+            messageId, 
             phone, 
             messageText, 
-            type || 'text', 
-            mediaUrl, 
-            null,
-            fromMe || false,
-            new Date(timestamp * 1000) // Converter timestamp Unix para Date
+            messageType,
+            fromMe,
+            new Date(messageTimestamp * 1000) // Converter timestamp Unix para Date
         ]);
         
-        console.log(`📱 Nova mensagem de ${contactName} (${phone}): ${messageText || 'mídia'}`);
+        console.log(`📱 Nova mensagem de ${contactName} (${phone}): ${messageText}`);
         res.json({ success: true, message: 'Webhook processado com sucesso' });
         
     } catch (error) {
-        console.error('Erro no webhook ZapperAPI:', error);
+        console.error('❌ Erro no webhook ZapperAPI:', error);
         res.status(500).json({ error: error.message });
     }
 });

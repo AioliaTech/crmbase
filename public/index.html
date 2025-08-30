@@ -377,9 +377,23 @@
             const input = document.getElementById('messageText');
             const message = input.value.trim();
             
-            if (!message || !currentConversation) return;
+            console.log('📤 Tentando enviar:', { message, currentConversation });
+            
+            if (!message || !currentConversation) {
+                console.log('❌ Mensagem vazia ou conversa não selecionada');
+                return;
+            }
+            
+            // Desabilitar botão temporariamente
+            const sendBtn = document.querySelector('button[onclick="sendMessage()"]');
+            if (sendBtn) {
+                sendBtn.disabled = true;
+                sendBtn.textContent = 'Enviando...';
+            }
             
             try {
+                console.log('🚀 Fazendo requisição para:', '/api/send-message');
+                
                 const response = await fetch('/api/send-message', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -389,15 +403,30 @@
                     })
                 });
                 
-                if (response.ok) {
+                console.log('📡 Resposta recebida:', response.status);
+                
+                const result = await response.json();
+                console.log('📄 Dados da resposta:', result);
+                
+                if (response.ok && result.success) {
+                    console.log('✅ Mensagem enviada com sucesso');
                     input.value = '';
                     await loadMessages(currentConversation.id);
                     await loadConversations(); // Atualizar lista
+                } else {
+                    console.error('❌ Erro na resposta:', result);
+                    alert('Erro ao enviar mensagem: ' + (result.error || 'Erro desconhecido'));
                 }
                 
             } catch (error) {
-                console.error('Erro ao enviar mensagem:', error);
-                alert('Erro ao enviar mensagem');
+                console.error('❌ Erro na requisição:', error);
+                alert('Erro ao enviar mensagem: ' + error.message);
+            } finally {
+                // Reabilitar botão
+                if (sendBtn) {
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Enviar';
+                }
             }
         }
 

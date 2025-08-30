@@ -154,6 +154,12 @@ app.post('/webhook/zapper', async (req, res) => {
             return res.status(400).json({ error: 'Número do telefone não encontrado' });
         }
         
+        // Pular mensagens enviadas por nós para evitar duplicação
+        if (fromMe) {
+            console.log(`⚠️ Ignorando mensagem própria para evitar duplicação: ${messageId}`);
+            return res.json({ success: true, message: 'Mensagem própria ignorada' });
+        }
+        
         // Extrair texto da mensagem baseado no tipo
         let messageText = '';
         let messageType = 'text';
